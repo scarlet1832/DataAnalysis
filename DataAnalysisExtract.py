@@ -1,7 +1,7 @@
 """
 @file:DataAnalysisExtract.py
 @author: Outstanding Application Engineer
-@Date:2022/8/11
+@Date:2023/8/3
 @mail:Application@cn.inno.com
 """
 import math
@@ -15,6 +15,10 @@ from sensor_msgs import point_cloud2
 from sensor_msgs.msg import PointCloud2, PointField
 import ExcelOperation
 import random
+from sklearn.cluster import KMeans
+from sklearn.cluster import DBSCAN
+import hdbscan
+import re
 
 _DATATYPES = {}
 _DATATYPES[PointField.INT8] = ('b', 1)
@@ -223,12 +227,14 @@ class Extract:
         print(sorted_fields)
         
         # Differentiating LiDAR types through scanning beam patterns
-        self.LiDAR_model = self.LiDAR_model[0]
         max_scanline = max(res[:, self.scanline])
-        if max_scanline > 39 and max_scanline <= 127:
+        if max_scanline <= 39:
+            self.LiDAR_model = self.LiDAR_model[0]
+        elif max_scanline > 39 and max_scanline <= 127:
             self.LiDAR_model = self.LiDAR_model[2]
         elif max_scanline > 127:
             self.LiDAR_model = self.LiDAR_model[1]
+            
         return res, sorted_fields
 
     def get_fold_files(self, path):
@@ -266,56 +272,6 @@ class Analysis:
         self.extract = Extract()
         self.fitting_plane = Fitting_plane()
         self.q = Queue()
-
-    # def extract_point_fitting_plane(self, arrays):
-    #     if self.extract.topic != '/iv_points' and self.extract.topic != 'iv_points':
-    #         z = arrays[:, 0]
-    #         y = arrays[:, 1]
-    #         x = arrays[:, 2]
-    #     else:
-    #         x = arrays[:, 3]
-    #         y = arrays[:, 4]
-    #         z = arrays[:, 5]
-    #     A = np.zeros((3, 3))
-    #     for i in range(0, len(arrays[:, 3])):
-    #         A[(0, 0)] = A[(0, 0)] + x[i] ** 2
-    #         A[(0, 1)] = A[(0, 1)] + x[i] * y[i]
-    #         A[(0, 2)] = A[(0, 2)] + x[i]
-    #         A[(1, 0)] = A[(0, 1)]
-    #         A[(1, 1)] = A[(1, 1)] + y[i] ** 2
-    #         A[(1, 2)] = A[(1, 2)] + y[i]
-    #         A[(2, 0)] = A[(0, 2)]
-    #         A[(2, 1)] = A[(1, 2)]
-    #         A[(2, 2)] = len(arrays[:, 3])
-
-    #     B = np.zeros((3, 1))
-    #     for i in range(0, len(arrays[:, 3])):
-    #         B[(0, 0)] = B[(0, 0)] + x[i] * z[i]
-    #         B[(1, 0)] = B[(1, 0)] + y[i] * z[i]
-    #         B[(2, 0)] = B[(2, 0)] + z[i]
-
-    #     A_inv = np.linalg.inv(A)
-    #     X = np.dot(A_inv, B)
-    #     print('result：z = %.3f * x + %.3f * y + %.3f' % (X[(0, 0)], X[(1, 0)], X[(2, 0)]))
-    #     variance = 0
-    #     for i in range(len(arrays[:, 3])):
-    #         variance = variance + (X[(0, 0)] * x[i] + X[(1, 0)] * y[i] + X[(2, 0)] - z[i]) ** 2
-
-    #     print('standard deviation:{}'.format(math.sqrt(variance / len(arrays[:, 3])) * 100))
-    #     # ax = plt.axes(projection='3d')
-    #     # ax.scatter3D(z, y, x, cmap='b', c='r')
-    #     # ax.set_xlabel('X Label')
-    #     # ax.set_ylabel('Y Label')
-    #     # ax.set_zlabel('Z Label')
-    #     # x1 = x
-    #     # y1 = y
-    #     # x1, y1 = np.meshgrid(x1, y1)
-    #     # z1 = X[(0, 0)] * x + X[(1, 0)] * y1 + X[(2, 0)]
-    #     # ax.plot_wireframe(z1, y1, x1, rstride=1, cstride=1)
-    #     # plt.xlim((min(z) - 0.3, max(z) + 0.3))
-    #     # plt.title('point extract')
-    #     # plt.show()
-    #     return ('{:.3f}'.format(X[(0, 0)]), '{:.3f}'.format(X[(1, 0)]), '{:.3f}'.format(X[(2, 0)]), '{:.3f}'.format(math.sqrt(variance / len(arrays[:, 3])) * 100))
 
     def point_number_of_FOV_per_frame(self, arrays):
         x = range(len(arrays))
@@ -358,6 +314,26 @@ class Analysis:
         plt.xlim((min(x) - 0.2, max(x) + 0.2))
         plt.show()
 
+    def get_filepath_distance(self, file_path):
+        pattern = r'(\d+)m'
+        match = re.search(pattern, file_path)
+        if match:
+            Theory_distance = float(match.group(1))
+            return Theory_distance
+        else:
+            print('File path No match distance')
+            return 0
+        
+    def get_filepath_ref(self, file_path):
+        pattern = r'(\d+)ref'
+        match = re.search(pattern, file_path)
+        if match:
+            Theory_ref = float(match.group(1))
+            return Theory_ref
+        else:
+            print('File path No match ref')
+            return 0
+
     def Calculate_data(self, file_path, FrameLimit, BoundingBox, IntensityBox, case, topic):
         """
         Calculate the POD, average number of points per frame in FOV/Bounding, and reflectivity information(Main)
@@ -369,6 +345,22 @@ class Analysis:
         MeanItensity = ['NoResult']
         Precision = ['NoResult']
         self.extract.topic = self.extract.topics[topic]
+        Theory_distance = self.get_filepath_distance(file_path)
+        Theory_ref = self.get_filepath_ref(file_path)
+        
+        if len(BoundingBox) == 0:
+            BoundingBox = [-3, 3, -3, 3, Theory_distance - 0.3, Theory_distance + 0.3]
+
+        if len(IntensityBox) == 0:
+            if Theory_ref == 10:
+                IntensityBox = [0, 45]
+            elif Theory_ref == 40:
+                IntensityBox = [20, 80]
+            elif Theory_ref == 80:
+                IntensityBox = [40, 110]
+            else:
+                print('No match ref')
+        
         if self.extract.topic != '/iv_points' and self.extract.topic != 'iv_points':
             self.extract.x = 0
             self.extract.y = 1
@@ -449,7 +441,6 @@ class Analysis:
         meanintensity_perframe = []
         frame_min = FrameLimit[0]
         frame_max = FrameLimit[1]
-        pts_sel = self.Filter_xyz(pts_sel, FrameLimit, [], [0, 105])
         for i in range(frame_min, frame_max):
             a = pts_sel[np.where(pts_sel[:, f] == i)]
             meanintensity_perframe.append(np.mean(a[:, inten]))
@@ -498,16 +489,25 @@ class Analysis:
         Calculate points POD within the ‘bounding_box’
         """
         distance = self.get_points_distance(pts)
-        Horizontal_R = [0.09, 0.13, 0.086] # K, W, E
-        Vertical_R = [0.08, 0.37, 0.182]
-        Height = bounding[1] - bounding[0]
-        Width = bounding[3] - bounding[2]
+        
         index = 0
         if self.extract.LiDAR_model == 'W':
             index = 1
         elif self.extract.LiDAR_model == 'E':
             index = 2
             
+        Horizontal_R = [0.09, 0.13, 0.086] # K, W, E
+        Vertical_R = [0.08, 0.37, 0.182] 
+        V_Int = math.radians(Horizontal_R[index]) * distance
+        R_Int = math.radians(Vertical_R[index]) * distance
+        eps = max(V_Int, R_Int)
+        pts1 = Cluster.find_largest_cluster_DBSCAN(pts, 1.5 * eps, 50)
+        pts = pts[np.where((pts[:, 3] >= max(pts1[:,1]) - 1.55) & (pts[:, 3] <= max(pts1[:,1])))]
+        pts1 = Cluster.find_largest_cluster_DBSCAN(pts, eps + 0.01, 50)
+        pts = self.Filter_xyz(pts, None, [min(pts1[:,0]), max(pts1[:,0]), min(pts1[:,1]), max(pts1[:,1]), min(pts1[:,2]), max(pts1[:,2])], None)
+        res = self.Get_Max_Width_Height(pts)
+        Width = res[0]
+        Height = res[1]
         # LaserSpot = round(0.00087 * distance * 2, 3)
         # Height = bounding[1] - bounding[0] - LaserSpot * 1.2
         # Width = bounding[3] - bounding[2] - LaserSpot * 1.35
@@ -523,12 +523,12 @@ class Analysis:
 
             real_points = number / frame_count
         else:
-            row = math.atan(Width / (2 * distance)) * 2 * 180 / math.pi / Horizontal_R[index]
-            col = math.atan(Height / (2 * distance)) * 2 * 180 / math.pi / Vertical_R[index]
+            row = math.atan(Width / (2 * distance)) * 2 * 180 / math.pi / Horizontal_R[index] + 1
+            col = math.atan(Height / (2 * distance)) * 2 * 180 / math.pi / Vertical_R[index] + 1
             ideal_points = row * col
             pod = '{:.2%}'.format(real_points / ideal_points)
         if ideal_points < real_points:
-            pod = '{:.2%}'.format(1 + (real_points - ideal_points) / ideal_points)
+            pod = '{:.2%}'.format(1 + (real_points - ideal_points) / (ideal_points * 10))
         print('idea_points', ideal_points)
         print('real_points', real_points)
         print('pod:', pod)
@@ -560,6 +560,10 @@ class Analysis:
         """
         Analyze ROI&Non-ROI Angular Resolution
         """
+        if 'flags' in fields:
+            pts = pts[np.where((pts[:, 7] > 10) & (pts[:, 7] < 12))]
+            temp = np.zeros(len(fields) + 2)
+        result = self.q.get()
         if 'flags' in fields:
             pts = pts[np.where((pts[:, 7] > 10) & (pts[:, 7] < 12))]
             temp = np.zeros(len(fields) + 2)
@@ -596,6 +600,7 @@ class Analysis:
         roi_line = 56
         scanline_coef = 4
         widest_line = temp[np.where(temp[:, 1] == 64)] #Robin E
+        # widest_line = temp[np.where(temp[:, 1] == 0)] #Robin E
 
         if I >= 0: # Falcon I/G/K/K24
             temp = temp[np.where(temp[:, -1] == I)]
@@ -623,6 +628,7 @@ class Analysis:
         top_point = temp[np.where((temp[:, 4] > -0.05) & (temp[:, 4] < 0.05))]
         top_point = top_point[np.where(top_point[:, 3] == max(top_point[:, 3]))]
 
+        # line_num = 128
         line_num = (max(temp[:, 1]) - min(temp[:, 1]) + 1) * scanline_coef - roi_line
         points_num = max(widest_line[:, 2]) - min(widest_line[:, 2]) + 1
         Bx = bottom_point[(0, 3)]
@@ -784,45 +790,83 @@ class Fitting_plane:
         Precision = ['a', a, 'b', b, 'c', c, 'sigma', best_std_dev]
         print(Precision)
         return Precision
+    
+class Cluster:
+        
+    def __init__(self):
+        pass
+    
+    def find_largest_cluster_KMeans(points):
+        # 使用KMeans进行粗略聚类
+        kmeans = KMeans(n_clusters=150)  # 或者使用 DBSCAN(n_clusters=10)
+        labels = kmeans.fit_predict(points[:, 3:6])
+        
+        # 找出每个类别的点数
+        unique_labels, counts = np.unique(labels, return_counts=True)
+        
+        # 找到点数最多的类别
+        largest_cluster_label = unique_labels[np.argmax(counts)]
+        
+        # 输出点数最多的类别
+        largest_cluster = points[:, 3:6][labels == largest_cluster_label]
+        return largest_cluster
+    
+    def find_largest_cluster_DBSCAN(points, e, min_samples):
+        # 使用DBSCAN进行粗略聚类
+        print('eps:', e, 'min_samples:', min_samples)
+        dbscan = DBSCAN(eps=e, min_samples=min_samples)  # 调整eps和min_samples参数
+        labels = dbscan.fit_predict(points[:, 3:6])
+        
+        # 找出每个类别的点数
+        unique_labels, counts = np.unique(labels, return_counts=True)
+        
+        # 找到点数最多的类别
+        largest_cluster_label = unique_labels[np.argmax(counts)]
+        
+        # 输出点数最多的类别
+        largest_cluster = points[:, 3:6][labels == largest_cluster_label]
+        return largest_cluster
+    
+    def find_largest_cluster_HDBSCAN(points, e, min_samples):
+        # 使用HDBSCAN进行聚类
+        clusterer = hdbscan.HDBSCAN(min_cluster_size=10, min_samples=min_samples)
+        cluster_labels = clusterer.fit_predict(points[:, 3:6])
+
+        # 绘制聚类结果
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+
+        for cluster in np.unique(cluster_labels):
+            if cluster == -1:
+                color = 'gray'  # 噪声点
+            else:
+                color = plt.cm.jet(cluster / np.max(cluster_labels))  # 根据簇的标签选择颜色
+            ax.scatter(points[cluster_labels == cluster][:, 3],
+                        points[cluster_labels == cluster][:, 4],
+                        points[cluster_labels == cluster][:, 5],
+                        c=color, marker='o')
+
+        plt.show()
+
 
 if __name__ == '__main__':
     system_pod_points = [[22, 634, 635], [23, 635, 636], 4]
     intensity_bounding = []
     file_path = [
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-10/2023_07_04_13_48_2710ref_0_2m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-10/2023_07_04_14_02_0810ref_0_20m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-10/2023_07_04_14_15_5210ref_0_40m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-10/2023_07_04_14_21_4710ref_0_60m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-10/2023_07_04_14_26_3010ref_0_80m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-10/2023_07_04_14_35_5310ref_0_100m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-10/2023_07_04_14_39_5710ref_0_120m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-10/2023_07_04_14_44_3510ref_0_140m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-10/2023_07_04_14_47_3010ref_0_160m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-10/2023_07_04_14_52_4310ref_0_180m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-10/2023_07_04_15_00_2110ref_0_200m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-10/2023_07_04_15_05_0510ref_0_220m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-10/2023_07_04_15_11_0010ref_0_240m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-10/2023_07_04_15_13_0610ref_0_250m.bag',
-
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-40/2023_07_03_15_23_080_40ref_2m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-40/2023_07_03_15_26_230_40ref_20m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-40/2023_07_03_15_29_480_40ref_40m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-40/2023_07_03_15_34_500_40ref_60m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-40/2023_07_03_15_39_080_40ref_80m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-40/2023_07_03_15_43_090_40ref_100m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-90/2023_07_03_15_47_010_90ref_2m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-90/2023_07_03_15_49_210_90ref_20m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-90/2023_07_03_15_52_000_90ref_40m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-90/2023_07_03_15_55_250_90ref_60m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-90/2023_07_03_15_58_000_90ref_80m.bag',
-     '/home/demo/Desktop/MetaView_Linux_v1.2.0.2/172.168.1.10_20647/0-90/2023_07_03_16_02_200_90ref_100m.bag']
-    bounding00 = [-0.26, 0.55, -0.55, 1.05, 2.15, 2.3] #10%ref
-    bounding0 = [-0.1, 1.5, -0.2, 1.3, 20.2, 20.3]
-    bounding1 = [0.1, 1.6, -0.25, 1.2, 40.15, 40.25]
-    bounding2 = [0.15, 1.75, -0.1, 1.45, 59.9, 60]
-    bounding3 = [0.35, 1.85, -0.45, 1.05, 80, 80.25]
-    bounding4 = [0.41, 1.95, -1.45, 0.05, 100, 100.2]
-    bounding5 = [0.6, 2.15, -1.85, -0.2, 119.9, 120.15]
+    "/home/demo/Desktop/004TestData/0815_robinw/10ref10m_2023-08-15-14-39-18.bag",
+    "/home/demo/Desktop/004TestData/0815_robinw/10ref20m_2023-08-15-14-37-14.bag",
+    "/home/demo/Desktop/004TestData/0815_robinw/10ref30m_2023-08-15-14-35-51.bag",
+    "/home/demo/Desktop/004TestData/0815_robinw/10ref40m_2023-08-15-14-34-37.bag",
+    "/home/demo/Desktop/004TestData/0815_robinw/10ref50m_2023-08-15-14-33-05.bag",
+    "/home/demo/Desktop/004TestData/0815_robinw/10ref60m_2023-08-15-14-13-04.bag",
+    "/home/demo/Desktop/004TestData/0815_robinw/10ref70m_2023-08-15-14-07-01.bag"]
+    bounding00 = [-0.55, 1.3, 0.1, 1.75, 9.9, 10.35] #10%ref
+    bounding0 = [-0.75, 1.1, 0.7, 2.35, 19.9, 20.35]
+    bounding1 = [-0.7, 1.15, 1.5, 3.1, 29.9, 30.4]
+    bounding2 = [-0.75, 1.1, 2.5, 4.15, 39.9, 40.45]
+    bounding3 = [-0.9, 0.9, 3.5, 5.05, 49.5, 50.15]
+    bounding4 = [-0.6, 1.2, 2, 3.5, 59.7, 60.3]
+    bounding5 = [-1.05, 0.85, 1.45, 2.95, 69.9, 70.4]
     bounding6 = [0.75, 2.25, -2.2, -0.7, 139.95, 140.2]
     bounding7 = [0.9, 2.55, -2.65, -0.9, 160, 160.2]
     bounding8 = [0.9, 2.45, -1.1, 0.55, 179.95, 180.3]
@@ -842,42 +886,17 @@ if __name__ == '__main__':
     bounding21 = [0, 0.95, -1.3, -0.4, 60.2, 60.3]
     bounding22 = [0.08, 0.98, -2.75, -1.8, 80, 80.1]
     bounding23 = [0.05, 1, -3.4, -2.4, 99.9, 100.1]
-    # bounding24 = [-0.75, 0.85, -1.55, 0, 119.8, 120.8]
-    # bounding25 = [0.3, 1.85, -1.55, 0, 119.8, 120.8]
-    # bounding26 = [0.45, 1.95, -1.55, 0, 119.8, 120.8]
-    # bounding27 = [0.45, 1.95, -1.6, -0.1, 119.8, 120.8]
-    # bounding28 = [-0.15, 1.35, -2.3, -0.8, 119.8, 120.8]
-    # bounding29 = [0.1, 1.6, -2.2, -0.7, 119.8, 120.8]
-    # bounding30 = [0.4, 1.8, -2.2, -0.7, 119.8, 120.8]
-    # bounding31 = [0.25, 1.85, -2.25, -0.75, 119.8, 120.8]
+
     bounding = [bounding00, bounding0, bounding1, bounding2, bounding3, bounding4,
-     bounding5, bounding6, bounding7, bounding8, bounding9,
-     bounding10, bounding11, bounding12,
-     bounding13, bounding14,
-     bounding15, bounding01, bounding16, bounding17,
-     bounding18, bounding19, bounding20, bounding21, bounding22,
-     bounding23]
-    # bounding24
-    # bounding25
-    # bounding26, bounding27,
-    # bounding28, bounding29, bounding30, bounding31]
-    FrameLimit0 = [100, 200]
-    FrameLimit1 = [0, 100]
-    FrameLimit2 = [70, 170]
-    FrameLimit3 = [50, 150]
-    FrameLimit4 = [0, 100]
-    FrameLimit5 = [0, 100]
-    FrameLimit6 = [0, 100]
-    FrameLimit7 = [0, 100]
-    FrameLimit8 = [0, 100]
-    FrameLimit9 = [0, 100]
-    FrameLimit10 = [0, 100]
-    FrameLimit11 = [0, 100]
-    FrameLimit = [FrameLimit0, FrameLimit1, FrameLimit2, FrameLimit3, FrameLimit4,
-     FrameLimit5, FrameLimit6, FrameLimit7, FrameLimit8, FrameLimit9,
-     FrameLimit10, FrameLimit11]
+                bounding5, bounding6, bounding7, bounding8, bounding9,
+                bounding10, bounding11, bounding12,
+                bounding13, bounding14,
+                bounding15, bounding01, bounding16, bounding17,
+                bounding18, bounding19, bounding20, bounding21, bounding22,
+                bounding23]
+
     
     # for i in range(len(file_path)):
-    #     Analysis().Calculate_data(file_path[i + 20], [0, 100], bounding[i + 20], [65,110], [0, 1, 0, 0, 0], 0)
-    Analysis().Calculate_data('/home/demo/Downloads/2023_07_04_14_40_1010ref_0_120m.bag', [0, 100], [0.65, 2.35, -1.87, -0.35, 119.9, 120.15], [], [0, 0, 0, 1, 0], 0)
+    #     Analysis().Calculate_data(file_path[i], [0, 100], bounding[i], [], [0, 1, 1, 1, 1], 0)
+    Analysis().Calculate_data('/home/demo/Desktop/004TestData/20418_10ref60m_2023-02-27-10-38-17.bag', [0, 100], [], [], [0, 0, 0, 0, 1], 0)
     print('What have done is done')

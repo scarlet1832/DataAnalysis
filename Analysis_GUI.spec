@@ -6,7 +6,7 @@ block_cipher = None
 
 a = Analysis(
     ['Analysis_GUI.py'],
-    pathex=['DataAnalysisExtract.py', 'child.py', 'Main.py', 'ExcelOperation.py'],
+    pathex=[],
     binaries=[],
     datas=[],
     hiddenimports=[],
